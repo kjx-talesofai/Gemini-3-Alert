@@ -1,0 +1,5 @@
+{
+  "name": "Red Alert 2: React Skirmish",
+  "description": "A functional RTS prototype inspired by Red Alert 2. Features Allied vs Soviet factions, base building, resource gathering, unit production, and real-time combat.",
+  "requestFramePermissions": []
+}
