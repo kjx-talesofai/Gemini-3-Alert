@@ -26,6 +26,7 @@ export const Game: React.FC<GameProps> = ({ config, onExit }) => {
   const lastUnderAttackRef = useRef<number>(0);
   const placementModeRef = useRef<EntityType | null>(null);
   const prevBuildingsRef = useRef<Set<EntityType>>(new Set());
+  const aiActionCooldownRef = useRef<number>(0); // Cooldown to prevent instant rebuilds
 
   // Input State Refs
   const keysPressedRef = useRef<Set<string>>(new Set());
@@ -41,7 +42,8 @@ export const Game: React.FC<GameProps> = ({ config, onExit }) => {
   });
   
   const [enemyState, setEnemyState] = useState<PlayerState>({
-    credits: config.enemyDifficulty === Difficulty.HARD ? 5000 : 3000,
+    // Give AI a bit more starting cash to ensure they reach War Factory
+    credits: config.enemyDifficulty === Difficulty.HARD ? 8000 : 5000,
     power: 0,
     powerUsage: 0,
     faction: config.enemyFaction
@@ -190,6 +192,10 @@ export const Game: React.FC<GameProps> = ({ config, onExit }) => {
       
       if (frameRef.current % 60 === 0) {
           setGameTime(t => t + 1);
+      }
+
+      if (aiActionCooldownRef.current > 0) {
+          aiActionCooldownRef.current--;
       }
 
       // --- Camera Pan (Keyboard) ---
@@ -423,36 +429,79 @@ export const Game: React.FC<GameProps> = ({ config, onExit }) => {
         const myBuildings = entities.filter(e => e.faction === faction && STATS[e.type].isBuilding);
         const myUnits = entities.filter(e => e.faction === faction && !STATS[e.type].isBuilding);
         const enemyBase = entities.find(e => e.faction === config.playerFaction && e.type === EntityType.CONSTRUCTION_YARD);
+        const myBase = myBuildings.find(e => e.type === EntityType.CONSTRUCTION_YARD);
 
-        if (myBuildings.length === 0 && myUnits.length === 0) return; 
+        if (!myBase && myUnits.length === 0) return; // Defeated
 
-        if (difficulty === Difficulty.HARD && state.credits < 2000) setEnemyState(s => ({...s, credits: s.credits + 50}));
-        else if (difficulty === Difficulty.MEDIUM && state.credits < 500) setEnemyState(s => ({...s, credits: s.credits + 10}));
+        // Resource Cheats / Trickle
+        if (difficulty === Difficulty.HARD && state.credits < 2000) {
+            setEnemyState(s => ({...s, credits: s.credits + 50}));
+        } else if (difficulty === Difficulty.MEDIUM && state.credits < 500) {
+            setEnemyState(s => ({...s, credits: s.credits + 10}));
+        }
 
-        const hasRefinery = myBuildings.some(e => e.type === EntityType.ORE_REFINERY);
-        const hasWarFactory = myBuildings.some(e => e.type === EntityType.WAR_FACTORY);
-        const hasBarracks = myBuildings.some(e => e.type === EntityType.BARRACKS);
-        const base = myBuildings.find(e => e.type === EntityType.CONSTRUCTION_YARD);
+        // --- Building Logic ---
+        // AI Cooldown check to prevent instant rebuilds (the "Heal" bug)
+        if (aiActionCooldownRef.current <= 0 && myBase && state.credits > 0) {
+             const hasPower = myBuildings.some(e => e.type === EntityType.POWER_PLANT);
+             const hasRefinery = myBuildings.some(e => e.type === EntityType.ORE_REFINERY);
+             const hasBarracks = myBuildings.some(e => e.type === EntityType.BARRACKS);
+             const hasWarFactory = myBuildings.some(e => e.type === EntityType.WAR_FACTORY);
 
-        if (base && state.credits > 0) {
-             if (!hasRefinery && state.credits >= STATS[EntityType.ORE_REFINERY].cost) {
-                 entitiesRef.current.push(spawnEntity(EntityType.ORE_REFINERY, { x: base.position.x, y: base.position.y - 100 }, faction));
-                 entitiesRef.current.push(spawnEntity(EntityType.HARVESTER, { x: base.position.x + 40, y: base.position.y - 100 }, faction));
-                 setEnemyState(s => ({...s, credits: s.credits - STATS[EntityType.ORE_REFINERY].cost}));
-             } 
-             else if (state.powerUsage >= state.power && state.credits >= STATS[EntityType.POWER_PLANT].cost) {
-                 entitiesRef.current.push(spawnEntity(EntityType.POWER_PLANT, { x: base.position.x - 80, y: base.position.y }, faction));
+             // Priority Order:
+             // 1. Initial Power (if none)
+             if (!hasPower && state.credits >= STATS[EntityType.POWER_PLANT].cost) {
+                 entitiesRef.current.push(spawnEntity(EntityType.POWER_PLANT, { x: myBase.position.x - 80, y: myBase.position.y }, faction));
                  setEnemyState(s => ({...s, credits: s.credits - STATS[EntityType.POWER_PLANT].cost}));
+                 aiActionCooldownRef.current = 300; // 5 seconds wait
              }
-             else if (hasRefinery && !hasBarracks && state.credits >= STATS[EntityType.BARRACKS].cost) {
-                 entitiesRef.current.push(spawnEntity(EntityType.BARRACKS, { x: base.position.x + 100, y: base.position.y }, faction));
+             // 2. Refinery (if none)
+             else if (!hasRefinery && hasPower && state.credits >= STATS[EntityType.ORE_REFINERY].cost) {
+                 entitiesRef.current.push(spawnEntity(EntityType.ORE_REFINERY, { x: myBase.position.x, y: myBase.position.y - 100 }, faction));
+                 entitiesRef.current.push(spawnEntity(EntityType.HARVESTER, { x: myBase.position.x + 40, y: myBase.position.y - 100 }, faction));
+                 setEnemyState(s => ({...s, credits: s.credits - STATS[EntityType.ORE_REFINERY].cost}));
+                 aiActionCooldownRef.current = 300;
+             }
+             // 3. Barracks (if none)
+             else if (!hasBarracks && hasRefinery && state.credits >= STATS[EntityType.BARRACKS].cost) {
+                 entitiesRef.current.push(spawnEntity(EntityType.BARRACKS, { x: myBase.position.x + 100, y: myBase.position.y }, faction));
                  setEnemyState(s => ({...s, credits: s.credits - STATS[EntityType.BARRACKS].cost}));
+                 aiActionCooldownRef.current = 300;
              }
-             else if (hasBarracks && !hasWarFactory && state.credits >= STATS[EntityType.WAR_FACTORY].cost) {
-                 entitiesRef.current.push(spawnEntity(EntityType.WAR_FACTORY, { x: base.position.x, y: base.position.y + 120 }, faction));
+             // 4. War Factory (if none)
+             else if (!hasWarFactory && hasBarracks && state.credits >= STATS[EntityType.WAR_FACTORY].cost) {
+                 entitiesRef.current.push(spawnEntity(EntityType.WAR_FACTORY, { x: myBase.position.x, y: myBase.position.y + 120 }, faction));
                  setEnemyState(s => ({...s, credits: s.credits - STATS[EntityType.WAR_FACTORY].cost}));
+                 aiActionCooldownRef.current = 300;
              }
-             else if (hasWarFactory) {
+             // 5. Additional Power (If low power)
+             // AI calculates its own power needs roughly
+             else {
+                 let power = 0;
+                 let usage = 0;
+                 entities.forEach(e => {
+                    if (e.faction === faction && STATS[e.type].isBuilding) {
+                        const val = POWER_VALUES[e.type] || 0;
+                        if (val > 0) power += val;
+                        if (val < 0) usage += Math.abs(val);
+                    }
+                 });
+                 
+                 if (usage >= power && state.credits >= STATS[EntityType.POWER_PLANT].cost) {
+                     // Build extra power plant slightly offset
+                     const offset = myBuildings.filter(e => e.type === EntityType.POWER_PLANT).length * 50;
+                     entitiesRef.current.push(spawnEntity(EntityType.POWER_PLANT, { x: myBase.position.x - 80, y: myBase.position.y + 60 + offset }, faction));
+                     setEnemyState(s => ({...s, credits: s.credits - STATS[EntityType.POWER_PLANT].cost}));
+                     aiActionCooldownRef.current = 300;
+                 }
+             }
+        }
+
+        // --- Unit Production Logic ---
+        if (aiActionCooldownRef.current <= 0) {
+            const hasWarFactory = myBuildings.some(e => e.type === EntityType.WAR_FACTORY);
+             
+            if (hasWarFactory) {
                 const factory = myBuildings.find(e => e.type === EntityType.WAR_FACTORY);
                 if (factory) {
                     let type = EntityType.TANK;
@@ -462,11 +511,13 @@ export const Game: React.FC<GameProps> = ({ config, onExit }) => {
                     if (state.credits >= cost) {
                         entitiesRef.current.push(spawnEntity(type, { x: factory.position.x, y: factory.position.y + 100 }, faction));
                         setEnemyState(s => ({...s, credits: s.credits - cost}));
+                        aiActionCooldownRef.current = 180; // 3 seconds between tanks
                     }
                 }
             }
         }
 
+        // --- Attack Logic ---
         const attackThreshold = difficulty === Difficulty.HARD ? 5 : (difficulty === Difficulty.MEDIUM ? 10 : 15);
         if (myUnits.length > attackThreshold && enemyBase) {
             myUnits.forEach(u => {
